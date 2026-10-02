@@ -5,10 +5,11 @@ import ImageIO
 // MARK: - Modell
 
 enum Tool: Int, CaseIterable {
-    case arrow, ellipse, rect, pen, marker, counter, redact, text
+    case select, arrow, ellipse, rect, pen, marker, counter, redact, text
 
     var symbol: String {
         switch self {
+        case .select: return "cursorarrow"
         case .arrow: return "arrow.up.right"
         case .ellipse: return "circle"
         case .rect: return "rectangle"
@@ -22,6 +23,7 @@ enum Tool: Int, CaseIterable {
 
     var shortcut: String {
         switch self {
+        case .select: return "v"
         case .arrow: return "a"
         case .ellipse: return "o"
         case .rect: return "r"
@@ -35,6 +37,7 @@ enum Tool: Int, CaseIterable {
 
     var help: String {
         switch self {
+        case .select: return "Velg og flytt (V) – dra for å flytte, ⌫ sletter, piltaster finjusterer, dobbeltklikk endrer tekst"
         case .arrow: return "Pil (A)"
         case .ellipse: return "Sirkel/ellipse (O) – hold ⇧ for perfekt sirkel"
         case .rect: return "Rektangel (R) – hold ⇧ for kvadrat"
@@ -136,6 +139,8 @@ struct Annotation {
         color.setStroke()
         color.setFill()
         switch tool {
+        case .select:
+            break
         case .arrow:
             drawArrow()
         case .ellipse:
@@ -173,6 +178,64 @@ struct Annotation {
                 ctx.cgContext.draw(patch, in: patchRect)
             }
         }
+    }
+
+    // MARK: Velg og flytt
+
+    private var strokeWidth: CGFloat { tool == .marker ? max(width * 4, 12) : width }
+    private var arrowHead: CGFloat { max(width * 4.5, 14) }
+
+    /// Linjen eller omrisset figuren tegnes langs (for treff på strek).
+    private var outline: CGPath? {
+        switch tool {
+        case .arrow:
+            let p = CGMutablePath()
+            p.move(to: start)
+            p.addLine(to: end)
+            return p
+        case .ellipse: return CGPath(ellipseIn: box, transform: nil)
+        case .rect: return CGPath(rect: box, transform: nil)
+        case .pen, .marker: return smoothPath().cgPath
+        default: return nil
+        }
+    }
+
+    /// Treffer punktet figuren? Ellipser og rektangler treffes på streken, så det som ligger inni kan velges.
+    func hitTest(_ p: CGPoint, tolerance t: CGFloat) -> Bool {
+        switch tool {
+        case .select: return false
+        case .counter: return hypot(p.x - start.x, p.y - start.y) <= counterDiameter / 2 + t
+        case .redact: return box.insetBy(dx: -t, dy: -t).contains(p)
+        case .text: return textRect.insetBy(dx: -t, dy: -t).contains(p)
+        case .arrow where hypot(p.x - end.x, p.y - end.y) <= arrowHead + t:
+            return true
+        default:
+            guard let path = outline else { return false }
+            return path.copy(strokingWithWidth: strokeWidth + 2 * t, lineCap: .round, lineJoin: .round, miterLimit: 10)
+                .contains(p)
+        }
+    }
+
+    /// Området figuren dekker (for markeringsrammen).
+    var bounds: CGRect {
+        switch tool {
+        case .select: return .zero
+        case .counter:
+            let d = counterDiameter
+            return CGRect(x: start.x - d / 2, y: start.y - d / 2, width: d, height: d)
+        case .redact: return box
+        case .text: return textRect
+        case .arrow: return box.insetBy(dx: -arrowHead / 2, dy: -arrowHead / 2)
+        default:
+            return (outline?.boundingBoxOfPath ?? box).insetBy(dx: -strokeWidth / 2, dy: -strokeWidth / 2)
+        }
+    }
+
+    func translated(dx: CGFloat, dy: CGFloat) -> Annotation {
+        var a = self
+        a.points = points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        a.patchRect = patchRect.offsetBy(dx: dx, dy: dy)
+        return a
     }
 
     // MARK: Tekst
@@ -405,6 +468,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     var onCommit: (() -> Void)?
     private var current: Annotation?
 
+    // Velg og flytt: valgt figur (indeks i doc.annotations) og kopien som flyttes mens musen dras.
+    var selection: Int? { didSet { needsDisplay = true } }
+    private var moveStart: CGPoint?
+    private var moving: Annotation?
+
     // Tekst som skrives akkurat nå: et tekstfelt oppå bildet til teksten er ferdig.
     private var textField: NSTextField?
     private var pendingText: Annotation?
@@ -452,13 +520,32 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         t.scale(by: scale)
         t.concat()
         doc.image.draw(in: CGRect(origin: .zero, size: doc.size))
-        for (i, a) in doc.annotations.enumerated() where i != editingIndex { a.draw() }
+        for (i, a) in doc.annotations.enumerated() where i != editingIndex && !(i == selection && moving != nil) {
+            a.draw()
+        }
+        moving?.draw()
         current?.draw()
         ctx.restoreGraphicsState()
+        drawSelection()
+    }
+
+    private func drawSelection() {
+        guard let sel = selection, sel < doc.annotations.count else { return }
+        let b = (moving ?? doc.annotations[sel]).bounds
+        let o = toView(b.origin)
+        let r = CGRect(x: o.x, y: o.y, width: b.width * scale, height: b.height * scale).insetBy(dx: -4, dy: -4)
+        let path = NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)
+        path.lineWidth = 1.5
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        path.stroke()
+        path.setLineDash([5, 3], count: 2, phase: 0)
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
     }
 
     override func resetCursorRects() {
-        addCursorRect(imageRect, cursor: tool == .text ? .iBeam : .crosshair)
+        let cursor: NSCursor = tool == .text ? .iBeam : tool == .select ? .arrow : .crosshair
+        addCursorRect(imageRect, cursor: cursor)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -474,6 +561,19 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         }
         window?.makeFirstResponder(self)
         let p = toImage(convert(event.locationInWindow, from: nil))
+        if tool == .select {
+            let hit = doc.annotations.lastIndex { $0.hitTest(p, tolerance: 6 / scale) }
+            selection = hit
+            guard let hit else { return }
+            if event.clickCount == 2, doc.annotations[hit].tool == .text {
+                selection = nil
+                beginText(at: p, existing: hit)
+                return
+            }
+            moveStart = p
+            moving = doc.annotations[hit]
+            return
+        }
         if tool == .text {
             let hit = doc.annotations.lastIndex { $0.tool == .text && $0.textRect.insetBy(dx: -6, dy: -6).contains(p) }
             beginText(at: p, existing: hit)
@@ -489,8 +589,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard var a = current else { return }
         var p = toImage(convert(event.locationInWindow, from: nil))
+        if let start = moveStart, let sel = selection {
+            var m = doc.annotations[sel].translated(dx: p.x - start.x, dy: p.y - start.y)
+            if m.tool == .redact { doc.applyRedaction(to: &m) }
+            moving = m
+            needsDisplay = true
+            return
+        }
+        guard var a = current else { return }
         switch a.tool {
         case .pen, .marker:
             if let last = a.points.last, hypot(p.x - last.x, p.y - last.y) < 1.5 { return }
@@ -507,6 +614,17 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if moveStart != nil {
+            let p = toImage(convert(event.locationInWindow, from: nil))
+            if let start = moveStart, let sel = selection, let m = moving, hypot(p.x - start.x, p.y - start.y) > 0.5 {
+                doc.mutate { $0[sel] = m }
+                onCommit?()
+            }
+            moveStart = nil
+            moving = nil
+            needsDisplay = true
+            return
+        }
         if let a = current, !a.isTrivial {
             doc.add(a)
             onCommit?()
@@ -517,7 +635,33 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     func cancelDrawing() {
         current = nil
+        moveStart = nil
+        moving = nil
+        selection = nil
         needsDisplay = true
+    }
+
+    func deleteSelection() {
+        guard let sel = selection, sel < doc.annotations.count else { return NSSound.beep() }
+        selection = nil
+        doc.mutate { $0.remove(at: sel) }
+        onCommit?()
+    }
+
+    func nudgeSelection(dx: CGFloat, dy: CGFloat) {
+        guard let sel = selection, sel < doc.annotations.count else { return }
+        var m = doc.annotations[sel].translated(dx: dx, dy: dy)
+        if m.tool == .redact { doc.applyRedaction(to: &m) }
+        doc.mutate { $0[sel] = m }
+        onCommit?()
+    }
+
+    /// Ny farge på valgt figur (sladd/piksler har ingen farge).
+    func recolorSelection(_ color: NSColor) {
+        guard let sel = selection, sel < doc.annotations.count,
+              doc.annotations[sel].tool != .redact, doc.annotations[sel].color != color else { return }
+        doc.mutate { $0[sel].color = color }
+        onCommit?()
     }
 
     /// ⇧: kvadrat/sirkel, eller pil i 45°-trinn.
@@ -712,6 +856,15 @@ final class EditorWindow: NSWindow {
         guard f.isDisjoint(with: [.command, .control, .option]), let ed = editor,
               let c = event.charactersIgnoringModifiers?.lowercased() else { return super.keyDown(with: event) }
         if event.keyCode == 53 { ed.canvas.cancelDrawing(); return } // Esc
+        if event.keyCode == 51 || event.keyCode == 117 { ed.canvas.deleteSelection(); return } // ⌫ / Delete
+        let step: CGFloat = f.contains(.shift) ? 10 : 1
+        switch event.keyCode {
+        case 123: ed.canvas.nudgeSelection(dx: -step, dy: 0); return
+        case 124: ed.canvas.nudgeSelection(dx: step, dy: 0); return
+        case 125: ed.canvas.nudgeSelection(dx: 0, dy: -step); return
+        case 126: ed.canvas.nudgeSelection(dx: 0, dy: step); return
+        default: break
+        }
         if let tool = Tool.allCases.first(where: { $0.shortcut == c }) { ed.select(tool: tool); return }
         if let n = Int(c), n >= 1, n <= EditorWindowController.palette.count { ed.select(colorIndex: n - 1); return }
         super.keyDown(with: event)
@@ -965,17 +1118,19 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     func select(tool: Tool) {
         if tool != .text { canvas.commitText() }
+        if tool != .select { canvas.selection = nil }
         toolControl.selectedSegment = tool.rawValue
         canvas.tool = tool
         Self.lastTool = tool
         textControls.isHidden = tool != .text
         redactControl.isHidden = tool != .redact
-        widthControl.isHidden = tool == .text || tool == .redact
+        widthControl.isHidden = tool == .text || tool == .redact || tool == .select
     }
 
     func select(colorIndex i: Int) { apply(color: Self.palette[i]) }
 
     private func apply(color: NSColor) {
+        canvas.recolorSelection(color)
         canvas.color = color
         Self.lastColor = color
         colorWell.color = color
@@ -1020,12 +1175,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     func undo() {
         canvas.commitText()
+        canvas.selection = nil
         doc.undo()
         refresh()
     }
 
     func redo() {
         canvas.commitText()
+        canvas.selection = nil
         doc.redo()
         refresh()
     }

@@ -26,6 +26,7 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 
 | Verktøy | Tast | |
 |---|---|---|
+| Velg og flytt | V | se under |
 | Pil | A | ⇧ låser til 45° |
 | Sirkel/ellipse | O | ⇧ gir perfekt sirkel |
 | Rektangel | R | ⇧ gir kvadrat |
@@ -42,6 +43,12 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 Klikk på en eksisterende tekst for å endre den (tøm den for å slette den). Du kan velge mellom seks
 lesbare fonter (SF Pro, Helvetica Neue, Arial, Verdana, Avenir Next og Georgia), 14–48 pt og fet skrift.
 Teksten får en tynn kontrastkant, så den er lesbar på både lys og mørk bakgrunn.
+
+**Velg og flytt:** Klikk på en figur for å velge den (stiplet ramme), og dra for å flytte den. ⌫ eller Delete
+sletter, piltastene finjusterer (1 pt, eller 10 pt med ⇧) og Esc fjerner valget. Klikk på en farge for å gi den valgte
+figuren ny farge, og dobbeltklikk på en tekst for å endre den. Ellipser og rektangler velges ved å klikke på streken,
+så det som ligger inni dem fortsatt kan velges. Flyttes en sladd, hentes innholdet på nytt fra det nye stedet.
+Alt kan angres.
 
 **Nummererte markører:** Hvert klikk setter ned en sirkel med neste nummer (1, 2, 3 …) i valgt farge. Dra mens
 museknappen er nede for å flytte markøren på plass. Tykkelsesvalget styrer størrelsen. Neste nummer er alltid ett
