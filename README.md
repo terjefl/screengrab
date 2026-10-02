@@ -48,7 +48,11 @@ Teksten får en tynn kontrastkant, så den er lesbar på både lys og mørk bakg
 sletter, piltastene finjusterer (1 pt, eller 10 pt med ⇧) og Esc fjerner valget. Klikk på en farge for å gi den valgte
 figuren ny farge, og dobbeltklikk på en tekst for å endre den. Ellipser og rektangler velges ved å klikke på streken,
 så det som ligger inni dem fortsatt kan velges. Flyttes en sladd, hentes innholdet på nytt fra det nye stedet.
-Alt kan angres.
+
+**Endre størrelse:** Dra i håndtakene på den valgte figuren. Piler har ett håndtak i hver ende. Ellipser, rektangler,
+sladd og frihånd har åtte håndtak (hjørner og sidekanter), og frihånd skaleres med. Tekst og nummererte markører har
+hjørnehåndtak og skaleres jevnt: tekst får større eller mindre skrift, og motsatt hjørne står fast.
+Flytting, størrelse, sletting og fargeendring kan angres.
 
 **Nummererte markører:** Hvert klikk setter ned en sirkel med neste nummer (1, 2, 3 …) i valgt farge. Dra mens
 museknappen er nede for å flytte markøren på plass. Tykkelsesvalget styrer størrelsen. Neste nummer er alltid ett

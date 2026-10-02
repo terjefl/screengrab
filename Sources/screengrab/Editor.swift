@@ -231,6 +231,87 @@ struct Annotation {
         }
     }
 
+    // MARK: Endre størrelse
+
+    enum Handle: Equatable {
+        case end(Int)  // pilens start (0) eller spiss (1)
+        case box(Int)  // 0–7 rundt rammen, mot klokka fra nede til venstre
+    }
+
+    /// Rammen håndtakene sitter på.
+    var frame: CGRect {
+        switch tool {
+        case .pen, .marker:
+            let xs = points.map(\.x), ys = points.map(\.y)
+            guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return .zero }
+            return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+        case .text: return textRect
+        case .counter:
+            let d = counterDiameter
+            return CGRect(x: start.x - d / 2, y: start.y - d / 2, width: d, height: d)
+        default: return box
+        }
+    }
+
+    static func boxHandlePoints(_ f: CGRect) -> [CGPoint] {
+        [CGPoint(x: f.minX, y: f.minY), CGPoint(x: f.midX, y: f.minY), CGPoint(x: f.maxX, y: f.minY),
+         CGPoint(x: f.maxX, y: f.midY), CGPoint(x: f.maxX, y: f.maxY), CGPoint(x: f.midX, y: f.maxY),
+         CGPoint(x: f.minX, y: f.maxY), CGPoint(x: f.minX, y: f.midY)]
+    }
+
+    /// Håndtakene for en valgt figur. Tekst og markører skaleres jevnt og har bare hjørner.
+    var handles: [(handle: Handle, point: CGPoint)] {
+        switch tool {
+        case .select: return []
+        case .arrow: return [(.end(0), start), (.end(1), end)]
+        default:
+            let all = Annotation.boxHandlePoints(frame)
+            let idx = (tool == .text || tool == .counter) ? [0, 2, 4, 6] : Array(0..<8)
+            return idx.map { (.box($0), all[$0]) }
+        }
+    }
+
+    /// Figuren med håndtaket dratt til p (beregnes alltid fra originalen da draget startet).
+    func resized(_ h: Handle, to p: CGPoint) -> Annotation {
+        var a = self
+        switch h {
+        case .end(let i):
+            a.points[i == 0 ? 0 : a.points.count - 1] = p
+            return a
+        case .box(let i):
+            let b = frame
+            var x0 = b.minX, x1 = b.maxX, y0 = b.minY, y1 = b.maxY
+            if [0, 6, 7].contains(i) { x0 = p.x }
+            if [2, 3, 4].contains(i) { x1 = p.x }
+            if [0, 1, 2].contains(i) { y0 = p.y }
+            if [4, 5, 6].contains(i) { y1 = p.y }
+            let nb = CGRect(x: min(x0, x1), y: min(y0, y1), width: abs(x1 - x0), height: abs(y1 - y0))
+            // Hjørnet rett overfor det som dras, står fast for tekst og markører.
+            let fixed = Annotation.boxHandlePoints(b)[(i + 4) % 8]
+            switch tool {
+            case .pen, .marker:
+                let sx = b.width > 0.5 ? nb.width / b.width : 1
+                let sy = b.height > 0.5 ? nb.height / b.height : 1
+                a.points = points.map { CGPoint(x: nb.minX + ($0.x - b.minX) * sx, y: nb.minY + ($0.y - b.minY) * sy) }
+            case .counter:
+                let d = min(max((nb.width + nb.height) / 2, 18), 240)
+                a.width = (d - 16) / 3.8
+                let dx: CGFloat = p.x >= fixed.x ? 1 : -1, dy: CGFloat = p.y >= fixed.y ? 1 : -1
+                a.points = [CGPoint(x: fixed.x + dx * d / 2, y: fixed.y + dy * d / 2)]
+            case .text:
+                let rw = b.width > 0 ? nb.width / b.width : 1, rh = b.height > 0 ? nb.height / b.height : 1
+                a.style.size = min(max(style.size * (rw + rh) / 2, 8), 300)
+                let size = a.textRect.size
+                let left = (i == 2 || i == 4) ? fixed.x : fixed.x - size.width
+                let top = (i == 0 || i == 2) ? fixed.y : fixed.y + size.height
+                a.points = [CGPoint(x: left, y: top)]
+            default:
+                a.points = [CGPoint(x: nb.minX, y: nb.minY), CGPoint(x: nb.maxX, y: nb.maxY)]
+            }
+            return a
+        }
+    }
+
     func translated(dx: CGFloat, dy: CGFloat) -> Annotation {
         var a = self
         a.points = points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
@@ -469,9 +550,19 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var current: Annotation?
 
     // Velg og flytt: valgt figur (indeks i doc.annotations) og kopien som flyttes mens musen dras.
-    var selection: Int? { didSet { needsDisplay = true } }
+    var selection: Int? {
+        didSet {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
     private var moveStart: CGPoint?
     private var moving: Annotation?
+    // Endre størrelse: håndtaket som dras og figuren slik den var da draget startet.
+    private var resizeHandle: Annotation.Handle?
+    private var resizeOriginal: Annotation?
+    private var didResize = false
+    private let handleSize: CGFloat = 8
 
     // Tekst som skrives akkurat nå: et tekstfelt oppå bildet til teksten er ferdig.
     private var textField: NSTextField?
@@ -541,11 +632,43 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         path.setLineDash([5, 3], count: 2, phase: 0)
         NSColor.controlAccentColor.setStroke()
         path.stroke()
+
+        for h in (moving ?? doc.annotations[sel]).handles {
+            let v = toView(h.point)
+            let r = CGRect(x: v.x - handleSize / 2, y: v.y - handleSize / 2, width: handleSize, height: handleSize)
+            let knob: NSBezierPath
+            if case .end = h.handle { knob = NSBezierPath(ovalIn: r.insetBy(dx: -1, dy: -1)) } else { knob = NSBezierPath(rect: r) }
+            NSColor.white.setFill()
+            knob.fill()
+            knob.lineWidth = 1.5
+            NSColor.controlAccentColor.setStroke()
+            knob.stroke()
+        }
+    }
+
+    private func handle(at viewPoint: CGPoint) -> Annotation.Handle? {
+        guard let sel = selection, sel < doc.annotations.count else { return nil }
+        let reach = handleSize / 2 + 3
+        return doc.annotations[sel].handles.last { h in
+            let v = toView(h.point)
+            return abs(v.x - viewPoint.x) <= reach && abs(v.y - viewPoint.y) <= reach
+        }?.handle
     }
 
     override func resetCursorRects() {
         let cursor: NSCursor = tool == .text ? .iBeam : tool == .select ? .arrow : .crosshair
         addCursorRect(imageRect, cursor: cursor)
+        guard tool == .select, let sel = selection, sel < doc.annotations.count else { return }
+        for h in doc.annotations[sel].handles {
+            let v = toView(h.point)
+            let c: NSCursor
+            switch h.handle {
+            case .box(1), .box(5): c = .resizeUpDown
+            case .box(3), .box(7): c = .resizeLeftRight
+            default: c = .crosshair
+            }
+            addCursorRect(CGRect(x: v.x - 7, y: v.y - 7, width: 14, height: 14), cursor: c)
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -562,6 +685,13 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(self)
         let p = toImage(convert(event.locationInWindow, from: nil))
         if tool == .select {
+            if let h = handle(at: convert(event.locationInWindow, from: nil)), let sel = selection {
+                resizeHandle = h
+                resizeOriginal = doc.annotations[sel]
+                moving = resizeOriginal
+                didResize = false
+                return
+            }
             let hit = doc.annotations.lastIndex { $0.hitTest(p, tolerance: 6 / scale) }
             selection = hit
             guard let hit else { return }
@@ -590,6 +720,14 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     override func mouseDragged(with event: NSEvent) {
         var p = toImage(convert(event.locationInWindow, from: nil))
+        if let h = resizeHandle, let orig = resizeOriginal {
+            var m = orig.resized(h, to: p)
+            if m.tool == .redact { doc.applyRedaction(to: &m) }
+            moving = m
+            didResize = true
+            needsDisplay = true
+            return
+        }
         if let start = moveStart, let sel = selection {
             var m = doc.annotations[sel].translated(dx: p.x - start.x, dy: p.y - start.y)
             if m.tool == .redact { doc.applyRedaction(to: &m) }
@@ -614,6 +752,18 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if resizeHandle != nil {
+            if didResize, let sel = selection, let m = moving {
+                doc.mutate { $0[sel] = m }
+                onCommit?()
+            }
+            resizeHandle = nil
+            resizeOriginal = nil
+            moving = nil
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+            return
+        }
         if moveStart != nil {
             let p = toImage(convert(event.locationInWindow, from: nil))
             if let start = moveStart, let sel = selection, let m = moving, hypot(p.x - start.x, p.y - start.y) > 0.5 {
@@ -623,6 +773,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             moveStart = nil
             moving = nil
             needsDisplay = true
+            window?.invalidateCursorRects(for: self)
             return
         }
         if let a = current, !a.isTrivial {
@@ -637,6 +788,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         current = nil
         moveStart = nil
         moving = nil
+        resizeHandle = nil
+        resizeOriginal = nil
         selection = nil
         needsDisplay = true
     }
@@ -654,6 +807,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if m.tool == .redact { doc.applyRedaction(to: &m) }
         doc.mutate { $0[sel] = m }
         onCommit?()
+        window?.invalidateCursorRects(for: self)
     }
 
     /// Ny farge på valgt figur (sladd/piksler har ingen farge).
