@@ -1,7 +1,7 @@
 # screengrab
 
 Et enkelt skjermklippverktøy for macOS som ligger i menylinjen. Det bruker systemets eget områdevalg
-(`screencapture -i`) og har et lite tegnevindu for piler, sirkler, rektangler, frihånd, markeringstusj, tekst og sladding/uskarphet.
+(`screencapture -i`) og har et lite tegnevindu for piler, sirkler, rektangler, frihånd, markeringstusj, nummererte markører, tekst og sladding/uskarphet.
 
 ## Hurtigtaster (standard, kan endres i Innstillinger)
 
@@ -31,6 +31,7 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 | Rektangel | R | ⇧ gir kvadrat |
 | Frihånd | P | |
 | Markeringstusj | M | |
+| Nummererte markører | N | hvert klikk gir neste nummer |
 | Skjul | B | piksler, uskarp eller svart sladd |
 | Tekst | T | se under |
 
@@ -41,6 +42,10 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 Klikk på en eksisterende tekst for å endre den (tøm den for å slette den). Du kan velge mellom seks
 lesbare fonter (SF Pro, Helvetica Neue, Arial, Verdana, Avenir Next og Georgia), 14–48 pt og fet skrift.
 Teksten får en tynn kontrastkant, så den er lesbar på både lys og mørk bakgrunn.
+
+**Nummererte markører:** Hvert klikk setter ned en sirkel med neste nummer (1, 2, 3 …) i valgt farge. Dra mens
+museknappen er nede for å flytte markøren på plass. Tykkelsesvalget styrer størrelsen. Neste nummer er alltid ett
+høyere enn det høyeste i bildet, så rekkefølgen henger sammen også etter angre.
 
 **Skjul:** Dra et rektangel over det som skal skjules, og velg variant i verktøylinjen. *Piksler* gjør området
 om til store blokker, *Uskarp* gjør det uskarpt og *Sladd* dekker det med svart. Piksler og uskarphet hentes alltid

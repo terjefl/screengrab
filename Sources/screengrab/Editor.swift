@@ -5,7 +5,7 @@ import ImageIO
 // MARK: - Modell
 
 enum Tool: Int, CaseIterable {
-    case arrow, ellipse, rect, pen, marker, redact, text
+    case arrow, ellipse, rect, pen, marker, counter, redact, text
 
     var symbol: String {
         switch self {
@@ -14,6 +14,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "rectangle"
         case .pen: return "scribble"
         case .marker: return "highlighter"
+        case .counter: return "1.circle"
         case .redact: return "eye.slash"
         case .text: return "textformat"
         }
@@ -26,6 +27,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "r"
         case .pen: return "p"
         case .marker: return "m"
+        case .counter: return "n"
         case .redact: return "b"
         case .text: return "t"
         }
@@ -38,6 +40,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "Rektangel (R) – hold ⇧ for kvadrat"
         case .pen: return "Frihånd (P)"
         case .marker: return "Markeringstusj (M)"
+        case .counter: return "Nummererte markører (N) – hvert klikk gir neste nummer"
         case .redact: return "Skjul (B) – piksler, uskarp eller svart sladd. Svart sladd er sikrest."
         case .text: return "Tekst (T) – klikk for å skrive, klikk på en tekst for å endre den"
         }
@@ -103,6 +106,7 @@ struct Annotation {
     var text = ""
     var style = TextStyle()
     var redact = RedactMode.pixelate
+    var number = 0
     /// Ferdig behandlet utsnitt av originalbildet (piksler/uskarp) og området det dekker.
     var patch: CGImage?
     var patchRect: CGRect = .zero
@@ -119,6 +123,7 @@ struct Annotation {
         switch tool {
         case .pen, .marker: return points.count < 2
         case .text: return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .counter: return false
         case .redact: return min(box.width, box.height) < 3
         default: return hypot(end.x - start.x, end.y - start.y) < 3
         }
@@ -156,6 +161,8 @@ struct Annotation {
             p.stroke()
         case .text:
             drawText(in: ctx)
+        case .counter:
+            drawCounter()
         case .redact:
             if redact == .solid || patch == nil {
                 NSColor.black.setFill()
@@ -192,6 +199,30 @@ struct Annotation {
         let halo = TextFonts.halo(for: color)
         attributed([.strokeColor: halo, .strokeWidth: 16, .foregroundColor: halo]).draw(with: r, options: opts)
         attributed().draw(with: r, options: opts)
+    }
+
+    // MARK: Nummererte markører
+
+    /// Diameter etter valgt tykkelse (tynn/middels/tykk → 24/32/42 pt).
+    var counterDiameter: CGFloat { 16 + width * 3.8 }
+
+    private func drawCounter() {
+        let d = counterDiameter
+        let circle = CGRect(x: start.x - d / 2, y: start.y - d / 2, width: d, height: d)
+        // Kontrastkant skiller markøren fra bakgrunnen (hvit rundt mørke farger, mørk rundt lyse).
+        TextFonts.halo(for: color).setFill()
+        NSBezierPath(ovalIn: circle.insetBy(dx: -max(2, d * 0.08), dy: -max(2, d * 0.08))).fill()
+        color.setFill()
+        NSBezierPath(ovalIn: circle).fill()
+
+        let label = "\(number)" as NSString
+        let size = d * (label.length > 1 ? 0.48 : 0.58)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: size, weight: .bold),
+            .foregroundColor: TextFonts.halo(for: color).withAlphaComponent(1),
+        ]
+        let t = label.size(withAttributes: attrs)
+        label.draw(at: CGPoint(x: start.x - t.width / 2, y: start.y - t.height / 2), withAttributes: attrs)
     }
 
     // MARK: Figurer
@@ -304,6 +335,11 @@ final class EditorDocument {
         case .solid:
             break
         }
+    }
+
+    /// Neste nummer: ett høyere enn det høyeste i bildet (så angre holder rekkefølgen).
+    var nextCounterNumber: Int {
+        (annotations.filter { $0.tool == .counter }.map(\.number).max() ?? 0) + 1
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
@@ -445,6 +481,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         }
         current = Annotation(tool: tool, points: [p, p], color: color, width: lineWidth, redact: redactMode)
         if tool == .pen || tool == .marker { current?.points = [p] }
+        if tool == .counter {
+            current?.points = [p]
+            current?.number = doc.nextCounterNumber
+        }
         needsDisplay = true
     }
 
@@ -455,6 +495,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         case .pen, .marker:
             if let last = a.points.last, hypot(p.x - last.x, p.y - last.y) < 1.5 { return }
             a.points.append(p)
+        case .counter:
+            a.points[0] = p
         default:
             if event.modifierFlags.contains(.shift) { p = constrain(from: a.points[0], to: p, tool: a.tool) }
             a.points[1] = p
