@@ -1,0 +1,40 @@
+# Byggeresultater (SwiftPM og build.sh)
+.build/
+build/
+*.app
+*.dSYM/
+*.dSYM.zip
+
+# SwiftPM / Xcode lokalt
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Signering og hemmeligheter skal aldri inn i repoet
+*.p12
+*.pem
+*.key
+*.cer
+*.keychain
+*.keychain-db
+*.mobileprovision
+keychain-pw
+.env
+.env.*
+
+# Lokale verktøyinnstillinger
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Testbilder og logger
+*.log

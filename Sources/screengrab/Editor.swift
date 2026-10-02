@@ -1,0 +1,1007 @@
+import AppKit
+import ImageIO
+
+// MARK: - Modell
+
+enum Tool: Int, CaseIterable {
+    case arrow, ellipse, rect, pen, marker, text
+
+    var symbol: String {
+        switch self {
+        case .arrow: return "arrow.up.right"
+        case .ellipse: return "circle"
+        case .rect: return "rectangle"
+        case .pen: return "scribble"
+        case .marker: return "highlighter"
+        case .text: return "textformat"
+        }
+    }
+
+    var shortcut: String {
+        switch self {
+        case .arrow: return "a"
+        case .ellipse: return "o"
+        case .rect: return "r"
+        case .pen: return "p"
+        case .marker: return "m"
+        case .text: return "t"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .arrow: return "Pil (A)"
+        case .ellipse: return "Sirkel/ellipse (O) – hold ⇧ for perfekt sirkel"
+        case .rect: return "Rektangel (R) – hold ⇧ for kvadrat"
+        case .pen: return "Frihånd (P)"
+        case .marker: return "Markeringstusj (M)"
+        case .text: return "Tekst (T) – klikk for å skrive, klikk på en tekst for å endre den"
+        }
+    }
+}
+
+/// Et lite utvalg godt lesbare fonter.
+enum TextFonts {
+    static let all: [(family: String, title: String)] = [
+        ("system", "SF Pro (system)"),
+        ("Helvetica Neue", "Helvetica Neue"),
+        ("Arial", "Arial"),
+        ("Verdana", "Verdana"),
+        ("Avenir Next", "Avenir Next"),
+        ("Georgia", "Georgia"),
+    ]
+    static let sizes: [CGFloat] = [14, 18, 24, 32, 48]
+
+    static func font(_ family: String, size: CGFloat, bold: Bool) -> NSFont {
+        if family != "system",
+           let f = NSFontManager.shared.font(withFamily: family, traits: bold ? .boldFontMask : [],
+                                             weight: bold ? 9 : 5, size: size) {
+            return f
+        }
+        return .systemFont(ofSize: size, weight: bold ? .bold : .regular)
+    }
+
+    /// Kontrastkant rundt teksten, så den er lesbar på både lys og mørk bakgrunn.
+    static func halo(for color: NSColor) -> NSColor {
+        guard let c = color.usingColorSpace(.sRGB) else { return .white }
+        let lum = 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent
+        return lum > 0.6 ? NSColor.black.withAlphaComponent(0.85) : NSColor.white.withAlphaComponent(0.9)
+    }
+}
+
+struct TextStyle {
+    var family = "system"
+    var size: CGFloat = 24
+    var bold = true
+}
+
+/// Én tegnet figur, i bildets punktkoordinater (origo nede til venstre).
+/// For tekst er points[0] tekstens øvre venstre hjørne.
+struct Annotation {
+    var tool: Tool
+    var points: [CGPoint]
+    var color: NSColor
+    var width: CGFloat
+    var text = ""
+    var style = TextStyle()
+
+    private var start: CGPoint { points.first ?? .zero }
+    private var end: CGPoint { points.last ?? .zero }
+    private var box: CGRect {
+        CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
+               width: abs(end.x - start.x), height: abs(end.y - start.y))
+    }
+
+    /// For små til å beholde (et klikk uten å dra, eller tom tekst).
+    var isTrivial: Bool {
+        switch tool {
+        case .pen, .marker: return points.count < 2
+        case .text: return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default: return hypot(end.x - start.x, end.y - start.y) < 3
+        }
+    }
+
+    func draw() {
+        guard let ctx = NSGraphicsContext.current else { return }
+        ctx.saveGraphicsState()
+        defer { ctx.restoreGraphicsState() }
+        color.setStroke()
+        color.setFill()
+        switch tool {
+        case .arrow:
+            drawArrow()
+        case .ellipse:
+            let p = NSBezierPath(ovalIn: box)
+            p.lineWidth = width
+            p.stroke()
+        case .rect:
+            let r = min(width, box.width / 2, box.height / 2)
+            let p = NSBezierPath(roundedRect: box, xRadius: r, yRadius: r)
+            p.lineWidth = width
+            p.lineJoinStyle = .round
+            p.stroke()
+        case .pen:
+            let p = smoothPath()
+            p.lineWidth = width
+            p.stroke()
+        case .marker:
+            // Multiply gjør at tekst under markeringen forblir lesbar.
+            ctx.compositingOperation = .multiply
+            color.withAlphaComponent(0.45).setStroke()
+            let p = smoothPath()
+            p.lineWidth = max(width * 4, 12)
+            p.stroke()
+        case .text:
+            drawText(in: ctx)
+        }
+    }
+
+    // MARK: Tekst
+
+    var font: NSFont { TextFonts.font(style.family, size: style.size, bold: style.bold) }
+
+    private func attributed(_ extra: [NSAttributedString.Key: Any] = [:]) -> NSAttributedString {
+        var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        for (k, v) in extra { attrs[k] = v }
+        return NSAttributedString(string: text, attributes: attrs)
+    }
+
+    var textRect: CGRect {
+        let s = attributed().boundingRect(with: CGSize(width: 100_000, height: 100_000),
+                                          options: [.usesLineFragmentOrigin, .usesFontLeading]).size
+        return CGRect(x: start.x, y: start.y - ceil(s.height), width: ceil(s.width), height: ceil(s.height))
+    }
+
+    private func drawText(in ctx: NSGraphicsContext) {
+        let r = textRect
+        let opts: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
+        ctx.cgContext.setLineJoin(.round)
+        // Først en bred kontur i kontrastfarge (positiv strokeWidth = bare kontur), så selve teksten oppå.
+        let halo = TextFonts.halo(for: color)
+        attributed([.strokeColor: halo, .strokeWidth: 16, .foregroundColor: halo]).draw(with: r, options: opts)
+        attributed().draw(with: r, options: opts)
+    }
+
+    // MARK: Figurer
+
+    private func drawArrow() {
+        let dx = end.x - start.x, dy = end.y - start.y
+        let len = hypot(dx, dy)
+        guard len > 0.5 else { return }
+        let angle = atan2(dy, dx)
+        let head = min(max(width * 4.5, 14), len * 0.6)
+        let spread: CGFloat = .pi / 7
+        let left = CGPoint(x: end.x - head * cos(angle - spread), y: end.y - head * sin(angle - spread))
+        let right = CGPoint(x: end.x - head * cos(angle + spread), y: end.y - head * sin(angle + spread))
+        // Skaftet slutter inne i pilhodet så den runde enden ikke stikker ut av spissen.
+        let back = head * cos(spread) * 0.8
+        let shaftEnd = CGPoint(x: end.x - back * cos(angle), y: end.y - back * sin(angle))
+
+        let shaft = NSBezierPath()
+        shaft.move(to: start)
+        shaft.line(to: shaftEnd)
+        shaft.lineWidth = width
+        shaft.lineCapStyle = .round
+        shaft.stroke()
+
+        let tip = NSBezierPath()
+        tip.move(to: end)
+        tip.line(to: left)
+        tip.line(to: right)
+        tip.close()
+        tip.lineJoinStyle = .round
+        tip.lineWidth = max(1, width / 3)
+        tip.fill()
+        tip.stroke()
+    }
+
+    private func smoothPath() -> NSBezierPath {
+        let p = NSBezierPath()
+        p.lineCapStyle = .round
+        p.lineJoinStyle = .round
+        guard let first = points.first else { return p }
+        p.move(to: first)
+        if points.count < 3 {
+            points.dropFirst().forEach { p.line(to: $0) }
+            return p
+        }
+        // Kvadratisk utjevning gjennom midtpunktene.
+        for i in 1..<points.count - 1 {
+            let a = points[i], b = points[i + 1]
+            let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            p.curve(to: mid, controlPoint1: a, controlPoint2: a)
+        }
+        p.line(to: points[points.count - 1])
+        return p
+    }
+}
+
+final class EditorDocument {
+    let url: URL
+    let cgImage: CGImage
+    /// Størrelse i punkter (Retina-skjermbilder har 2 piksler per punkt).
+    let size: CGSize
+    let image: NSImage
+    private(set) var annotations: [Annotation] = []
+    // Angre/gjør om lagrer hele lista; den er liten, og da dekkes også endring og sletting av tekst.
+    private var undoStack: [[Annotation]] = []
+    private var redoStack: [[Annotation]] = []
+
+    init?(url: URL) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        self.url = url
+        cgImage = cg
+        var size = CGSize(width: cg.width, height: cg.height)
+        if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+           let dpi = props[kCGImagePropertyDPIWidth] as? CGFloat, dpi > 72 {
+            size = CGSize(width: CGFloat(cg.width) * 72 / dpi, height: CGFloat(cg.height) * 72 / dpi)
+        }
+        self.size = size
+        image = NSImage(cgImage: cg, size: size)
+    }
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var isEmpty: Bool { annotations.isEmpty }
+
+    func mutate(_ change: (inout [Annotation]) -> Void) {
+        undoStack.append(annotations)
+        change(&annotations)
+        redoStack.removeAll()
+    }
+
+    func add(_ a: Annotation) { mutate { $0.append(a) } }
+
+    func undo() {
+        guard let prev = undoStack.popLast() else { return }
+        redoStack.append(annotations)
+        annotations = prev
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(annotations)
+        annotations = next
+    }
+
+    /// Bildet med figurene, i full oppløsning og originalens fargerom.
+    func renderPNG() -> Data? {
+        let w = cgImage.width, h = cgImage.height
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: cgImage.colorSpace ?? srgb, bitmapInfo: info)
+                ?? CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                             space: srgb, bitmapInfo: info) else { return nil }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.scaleBy(x: CGFloat(w) / size.width, y: CGFloat(h) / size.height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        annotations.forEach { $0.draw() }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let out = ctx.makeImage() else { return nil }
+        let rep = NSBitmapImageRep(cgImage: out)
+        rep.size = size // gir 144 dpi i PNG-en, slik at Retina-bilder limes inn i riktig størrelse
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+// MARK: - Tegneflate
+
+final class CanvasView: NSView, NSTextFieldDelegate {
+    let doc: EditorDocument
+    var tool: Tool = .arrow {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
+    var color: NSColor = .systemRed {
+        didSet { pendingText?.color = color; styleTextField() }
+    }
+    var lineWidth: CGFloat = 4
+    var textStyle = TextStyle() {
+        didSet { pendingText?.style = textStyle; styleTextField() }
+    }
+    var onCommit: (() -> Void)?
+    private var current: Annotation?
+
+    // Tekst som skrives akkurat nå: et tekstfelt oppå bildet til teksten er ferdig.
+    private var textField: NSTextField?
+    private var pendingText: Annotation?
+    private var editingIndex: Int?
+    var isEditingText: Bool { textField != nil }
+
+    init(doc: EditorDocument) {
+        self.doc = doc
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Bildet tilpasset vinduet, aldri forstørret.
+    private var imageRect: CGRect {
+        let s = min(bounds.width / doc.size.width, bounds.height / doc.size.height, 1)
+        let w = doc.size.width * s, h = doc.size.height * s
+        return CGRect(x: ((bounds.width - w) / 2).rounded(), y: ((bounds.height - h) / 2).rounded(), width: w, height: h)
+    }
+
+    private var scale: CGFloat { imageRect.width / doc.size.width }
+
+    private func toImage(_ p: CGPoint) -> CGPoint {
+        let r = imageRect
+        return CGPoint(x: (p.x - r.minX) / scale, y: (p.y - r.minY) / scale)
+    }
+
+    private func toView(_ p: CGPoint) -> CGPoint {
+        let r = imageRect
+        return CGPoint(x: r.minX + p.x * scale, y: r.minY + p.y * scale)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.underPageBackgroundColor.setFill()
+        bounds.fill()
+        let r = imageRect
+        guard let ctx = NSGraphicsContext.current else { return }
+        ctx.saveGraphicsState()
+        NSBezierPath(rect: r).addClip()
+        let t = NSAffineTransform()
+        t.translateX(by: r.minX, yBy: r.minY)
+        t.scale(by: scale)
+        t.concat()
+        doc.image.draw(in: CGRect(origin: .zero, size: doc.size))
+        for (i, a) in doc.annotations.enumerated() where i != editingIndex { a.draw() }
+        current?.draw()
+        ctx.restoreGraphicsState()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(imageRect, cursor: tool == .text ? .iBeam : .crosshair)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if isEditingText { styleTextField() }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Et klikk utenfor tekstfeltet avslutter teksten som skrives.
+        if isEditingText {
+            commitText()
+            return
+        }
+        window?.makeFirstResponder(self)
+        let p = toImage(convert(event.locationInWindow, from: nil))
+        if tool == .text {
+            let hit = doc.annotations.lastIndex { $0.tool == .text && $0.textRect.insetBy(dx: -6, dy: -6).contains(p) }
+            beginText(at: p, existing: hit)
+            return
+        }
+        current = Annotation(tool: tool, points: [p, p], color: color, width: lineWidth)
+        if tool == .pen || tool == .marker { current?.points = [p] }
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var a = current else { return }
+        var p = toImage(convert(event.locationInWindow, from: nil))
+        switch a.tool {
+        case .pen, .marker:
+            if let last = a.points.last, hypot(p.x - last.x, p.y - last.y) < 1.5 { return }
+            a.points.append(p)
+        default:
+            if event.modifierFlags.contains(.shift) { p = constrain(from: a.points[0], to: p, tool: a.tool) }
+            a.points[1] = p
+        }
+        current = a
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let a = current, !a.isTrivial {
+            doc.add(a)
+            onCommit?()
+        }
+        current = nil
+        needsDisplay = true
+    }
+
+    func cancelDrawing() {
+        current = nil
+        needsDisplay = true
+    }
+
+    /// ⇧: kvadrat/sirkel, eller pil i 45°-trinn.
+    private func constrain(from s: CGPoint, to p: CGPoint, tool: Tool) -> CGPoint {
+        let dx = p.x - s.x, dy = p.y - s.y
+        if tool == .arrow {
+            let step = CGFloat.pi / 4
+            let a = (atan2(dy, dx) / step).rounded() * step
+            let len = hypot(dx, dy)
+            return CGPoint(x: s.x + len * cos(a), y: s.y + len * sin(a))
+        }
+        let side = max(abs(dx), abs(dy))
+        return CGPoint(x: s.x + (dx < 0 ? -side : side), y: s.y + (dy < 0 ? -side : side))
+    }
+
+    // MARK: Tekst
+
+    private func beginText(at p: CGPoint, existing index: Int?) {
+        let a: Annotation
+        if let index {
+            a = doc.annotations[index]
+            editingIndex = index
+        } else {
+            // Teksten plasseres slik at klikkpunktet havner midt i første linje.
+            let lineHeight = TextFonts.font(textStyle.family, size: textStyle.size, bold: textStyle.bold).boundingRectForFont.height
+            a = Annotation(tool: .text, points: [CGPoint(x: p.x, y: p.y + lineHeight / 2)],
+                           color: color, width: lineWidth, style: textStyle)
+        }
+        pendingText = a
+        let f = NSTextField(string: a.text)
+        f.isBezeled = false
+        f.isBordered = false
+        f.drawsBackground = true
+        f.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.35)
+        f.focusRingType = .none
+        f.usesSingleLineMode = false
+        f.cell?.wraps = false
+        f.cell?.isScrollable = false
+        f.delegate = self
+        addSubview(f)
+        textField = f
+        styleTextField()
+        window?.makeFirstResponder(f)
+        f.currentEditor()?.selectedRange = NSRange(location: (a.text as NSString).length, length: 0)
+        needsDisplay = true
+    }
+
+    private func styleTextField() {
+        guard let f = textField, let a = pendingText else { return }
+        f.font = TextFonts.font(a.style.family, size: a.style.size * scale, bold: a.style.bold)
+        f.textColor = a.color
+        resizeTextField()
+    }
+
+    private func resizeTextField() {
+        guard let f = textField, let a = pendingText, let font = f.font else { return }
+        var text = f.currentEditor()?.string ?? f.stringValue
+        if text.isEmpty || text.hasSuffix("\n") { text += " " }
+        let size = NSAttributedString(string: text, attributes: [.font: font])
+            .boundingRect(with: CGSize(width: 100_000, height: 100_000), options: [.usesLineFragmentOrigin, .usesFontLeading]).size
+        let top = toView(a.points[0])
+        // Tekstfeltet har ca. 2 pt innvendig marg til venstre.
+        f.frame = NSRect(x: top.x - 2, y: top.y - ceil(size.height), width: ceil(size.width) + 16, height: ceil(size.height))
+    }
+
+    func controlTextDidChange(_ obj: Notification) { resizeTextField() }
+
+    func controlTextDidEndEditing(_ obj: Notification) { commitText() }
+
+    /// ↩ avslutter teksten, ⇧↩ / ⌥↩ gir ny linje, Esc forkaster.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.insertNewline(_:)) {
+            let f = NSApp.currentEvent?.modifierFlags ?? []
+            if f.contains(.shift) || f.contains(.option) {
+                textView.insertNewlineIgnoringFieldEditor(nil)
+                resizeTextField()
+            } else {
+                commitText()
+            }
+            return true
+        }
+        if sel == #selector(NSResponder.insertLineBreak(_:)) || sel == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
+            textView.insertNewlineIgnoringFieldEditor(nil)
+            resizeTextField()
+            return true
+        }
+        if sel == #selector(NSResponder.cancelOperation(_:)) {
+            endTextEditing(keep: false)
+            return true
+        }
+        return false
+    }
+
+    /// Kalles også før kopiering, lagring og verktøybytte.
+    func commitText() { endTextEditing(keep: true) }
+
+    private func endTextEditing(keep: Bool) {
+        guard let f = textField, var a = pendingText else { return }
+        a.text = f.currentEditor()?.string ?? f.stringValue
+        let index = editingIndex
+        textField = nil
+        pendingText = nil
+        editingIndex = nil
+        f.delegate = nil
+        window?.makeFirstResponder(self)
+        f.removeFromSuperview()
+        if keep {
+            if let index {
+                doc.mutate { list in
+                    if a.isTrivial { list.remove(at: index) } else { list[index] = a }
+                }
+            } else if !a.isTrivial {
+                doc.add(a)
+            }
+            onCommit?()
+        }
+        needsDisplay = true
+    }
+}
+
+// MARK: - Fargeknapp
+
+final class SwatchButton: NSButton {
+    let swatch: NSColor
+    var selected = false { didSet { needsDisplay = true } }
+
+    init(color: NSColor, target: AnyObject, action: Selector) {
+        swatch = color
+        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        isBordered = false
+        title = ""
+        self.target = target
+        self.action = action
+        widthAnchor.constraint(equalToConstant: 22).isActive = true
+        heightAnchor.constraint(equalToConstant: 22).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 3, dy: 3)
+        swatch.setFill()
+        NSBezierPath(ovalIn: r).fill()
+        NSColor.separatorColor.setStroke()
+        NSBezierPath(ovalIn: r).stroke()
+        if selected {
+            NSColor.controlAccentColor.setStroke()
+            let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+            ring.lineWidth = 2
+            ring.stroke()
+        }
+    }
+}
+
+// MARK: - Vindu
+
+/// Håndterer tastatursnarveier selv, siden appen ikke har noen menylinje.
+final class EditorWindow: NSWindow {
+    weak var editor: EditorWindowController?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard let ed = editor else { return super.performKeyEquivalent(with: event) }
+        let f = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let c = event.charactersIgnoringModifiers?.lowercased() ?? ""
+
+        if ed.canvas.isEditingText {
+            // ↩ skal avslutte teksten, ikke trykke standardknappen (Kopier).
+            if event.keyCode == 36 || event.keyCode == 76 { return false }
+            // Uten menylinje må vanlig tekstredigering sendes videre for hånd.
+            if f.contains(.command), !f.contains(.shift) {
+                let edit: [String: Selector] = ["c": #selector(NSText.copy(_:)), "v": #selector(NSText.paste(_:)),
+                                                "x": #selector(NSText.cut(_:)), "a": #selector(NSText.selectAll(_:))]
+                if let sel = edit[c] { return NSApp.sendAction(sel, to: nil, from: self) }
+                if c == "z" { (firstResponder as? NSTextView)?.undoManager?.undo(); return true }
+            }
+        }
+
+        guard f.contains(.command) else { return super.performKeyEquivalent(with: event) }
+        let shift = f.contains(.shift)
+        switch c {
+        case "c": ed.copyClicked()
+        case "s": shift ? ed.saveAsClicked() : ed.saveClicked()
+        case "z": shift ? ed.redo() : ed.undo()
+        case "w": performClose(nil)
+        default: return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let f = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard f.isDisjoint(with: [.command, .control, .option]), let ed = editor,
+              let c = event.charactersIgnoringModifiers?.lowercased() else { return super.keyDown(with: event) }
+        if event.keyCode == 53 { ed.canvas.cancelDrawing(); return } // Esc
+        if let tool = Tool.allCases.first(where: { $0.shortcut == c }) { ed.select(tool: tool); return }
+        if let n = Int(c), n >= 1, n <= EditorWindowController.palette.count { ed.select(colorIndex: n - 1); return }
+        super.keyDown(with: event)
+    }
+}
+
+final class EditorWindowController: NSWindowController, NSWindowDelegate {
+    static let palette: [NSColor] = [
+        NSColor(srgbRed: 1.00, green: 0.23, blue: 0.19, alpha: 1), // rød
+        NSColor(srgbRed: 1.00, green: 0.58, blue: 0.00, alpha: 1), // oransje
+        NSColor(srgbRed: 1.00, green: 0.84, blue: 0.00, alpha: 1), // gul
+        NSColor(srgbRed: 0.20, green: 0.78, blue: 0.35, alpha: 1), // grønn
+        NSColor(srgbRed: 0.00, green: 0.48, blue: 1.00, alpha: 1), // blå
+        NSColor(srgbRed: 0.69, green: 0.32, blue: 0.87, alpha: 1), // lilla
+        .black,
+        .white,
+    ]
+    static let widths: [CGFloat] = [2, 4, 7]
+
+    let doc: EditorDocument
+    let canvas: CanvasView
+    private let temporary: Bool
+    private var savedURL: URL?
+    var onClose: (() -> Void)?
+
+    private let bar = NSStackView()
+    private let toolControl = NSSegmentedControl()
+    private let widthControl = NSSegmentedControl()
+    private var swatches: [SwatchButton] = []
+    private let colorWell = NSColorWell(style: .minimal)
+    private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let sizePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let boldButton = NSButton()
+    private let textControls = NSStackView()
+    private let undoButton = NSButton()
+    private let statusLabel = NSTextField(labelWithString: "")
+    private var copyButton: NSButton!
+    private var saveButton: NSButton!
+
+    // Husk valgene mellom vinduer.
+    private static var lastTool: Tool = .arrow
+    private static var lastColor: NSColor = palette[0]
+    private static var lastWidth = 1
+    private static var lastTextStyle = TextStyle()
+
+    init?(url: URL, temporary: Bool) {
+        guard let doc = EditorDocument(url: url) else { return nil }
+        self.doc = doc
+        self.temporary = temporary
+        canvas = CanvasView(doc: doc)
+
+        let window = EditorWindow(contentRect: .zero, styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                                  backing: .buffered, defer: false)
+        window.title = temporary ? "Nytt skjermbilde" : url.lastPathComponent
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        super.init(window: window)
+        window.editor = self
+        window.delegate = self
+        buildUI()
+        apply(color: Self.lastColor)
+        widthControl.selectedSegment = Self.lastWidth
+        canvas.lineWidth = Self.widths[Self.lastWidth]
+        applyTextStyleToControls(Self.lastTextStyle)
+        canvas.textStyle = Self.lastTextStyle
+        select(tool: Self.lastTool)
+        canvas.onCommit = { [weak self] in self?.refresh() }
+        refresh()
+        NotificationCenter.default.addObserver(self, selector: #selector(updateButtonTitles),
+                                               name: .behaviorChanged, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func buildUI() {
+        guard let window else { return }
+
+        toolControl.segmentStyle = .separated
+        toolControl.trackingMode = .selectOne
+        toolControl.segmentCount = Tool.allCases.count
+        for t in Tool.allCases {
+            toolControl.setImage(NSImage(systemSymbolName: t.symbol, accessibilityDescription: t.help), forSegment: t.rawValue)
+            toolControl.setToolTip(t.help, forSegment: t.rawValue)
+            toolControl.setWidth(34, forSegment: t.rawValue)
+        }
+        toolControl.target = self
+        toolControl.action = #selector(toolChanged)
+
+        swatches = Self.palette.enumerated().map { i, c in
+            let b = SwatchButton(color: c, target: self, action: #selector(swatchClicked(_:)))
+            b.tag = i
+            b.toolTip = "Farge (\(i + 1))"
+            return b
+        }
+        colorWell.target = self
+        colorWell.action = #selector(colorWellChanged)
+        colorWell.toolTip = "Valgfri farge"
+        colorWell.widthAnchor.constraint(equalToConstant: 30).isActive = true
+
+        widthControl.segmentStyle = .separated
+        widthControl.trackingMode = .selectOne
+        widthControl.segmentCount = Self.widths.count
+        for (i, w) in Self.widths.enumerated() {
+            widthControl.setImage(lineImage(width: w), forSegment: i)
+            widthControl.setWidth(30, forSegment: i)
+        }
+        widthControl.setToolTip("Tynn", forSegment: 0)
+        widthControl.setToolTip("Middels", forSegment: 1)
+        widthControl.setToolTip("Tykk", forSegment: 2)
+        widthControl.target = self
+        widthControl.action = #selector(widthChanged)
+
+        // Tekstvalg (vises bare med tekstverktøyet).
+        for f in TextFonts.all {
+            fontPopup.addItem(withTitle: f.title)
+            fontPopup.lastItem?.attributedTitle = NSAttributedString(
+                string: f.title, attributes: [.font: TextFonts.font(f.family, size: 13, bold: false)])
+        }
+        fontPopup.toolTip = "Font"
+        fontPopup.target = self
+        fontPopup.action = #selector(textStyleChanged)
+        sizePopup.addItems(withTitles: TextFonts.sizes.map { "\(Int($0)) pt" })
+        sizePopup.toolTip = "Tekststørrelse"
+        sizePopup.target = self
+        sizePopup.action = #selector(textStyleChanged)
+        boldButton.setButtonType(.pushOnPushOff)
+        boldButton.bezelStyle = .rounded
+        boldButton.image = NSImage(systemSymbolName: "bold", accessibilityDescription: "Fet")
+        boldButton.title = ""
+        boldButton.toolTip = "Fet skrift"
+        boldButton.target = self
+        boldButton.action = #selector(textStyleChanged)
+        textControls.setViews([fontPopup, sizePopup, boldButton], in: .leading)
+        textControls.spacing = 6
+
+        undoButton.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: "Angre")
+        undoButton.bezelStyle = .rounded
+        undoButton.toolTip = "Angre (⌘Z), gjør om (⌘⇧Z)"
+        undoButton.target = self
+        undoButton.action = #selector(undoClicked)
+
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.lineBreakMode = .byTruncatingMiddle
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        copyButton = button("Kopier", "doc.on.doc", #selector(copyClicked))
+        copyButton.keyEquivalent = "\r" // standardknapp, blå
+        saveButton = button("Lagre", "square.and.arrow.down", #selector(saveClicked))
+        let saveAs = button("Lagre som…", nil, #selector(saveAsClicked))
+        saveAs.toolTip = "Lagre et annet sted (⌘⇧S)"
+        updateButtonTitles()
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let colors = NSStackView(views: swatches + [colorWell])
+        colors.spacing = 2
+        bar.setViews([toolControl, colors, widthControl, textControls, undoButton, spacer, statusLabel, saveAs, saveButton, copyButton],
+                     in: .leading)
+        bar.spacing = 12
+        bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        bar.setCustomSpacing(4, after: saveAs)
+        bar.setCustomSpacing(4, after: saveButton)
+
+        let content = NSView()
+        for v in [bar, canvas] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: content.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            canvas.topAnchor.constraint(equalTo: bar.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            canvas.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        window.contentView = content
+
+        // Start i bildets faktiske størrelse, men aldri større enn ~85 % av skjermen.
+        // Verktøylinjen er bredest når tekstvalgene vises.
+        textControls.isHidden = false
+        widthControl.isHidden = true
+        let barSize = bar.fittingSize
+        let screen = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let maxW = screen.width * 0.85, maxH = screen.height * 0.85 - barSize.height
+        let s = min(1, maxW / doc.size.width, maxH / doc.size.height)
+        let size = NSSize(width: max(doc.size.width * s, barSize.width),
+                          height: max(doc.size.height * s, 160) + barSize.height)
+        window.contentMinSize = NSSize(width: barSize.width, height: barSize.height + 120)
+        window.setContentSize(size)
+        window.center()
+    }
+
+    private func button(_ title: String, _ symbol: String?, _ sel: Selector) -> NSButton {
+        let b = NSButton(title: title, target: self, action: sel)
+        if let symbol {
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            b.imagePosition = .imageLeading
+        }
+        return b
+    }
+
+    @objc private func updateButtonTitles() {
+        let copy = Settings.shared.copyBehavior, save = Settings.shared.saveBehavior
+        copyButton.title = copy.buttonTitle
+        copyButton.toolTip = "\(copy.title) (⌘C eller ↩)"
+        saveButton.title = save.buttonTitle
+        saveButton.toolTip = "\(save.title) – i skjermbildemappen (⌘S)"
+    }
+
+    private func lineImage(width: CGFloat) -> NSImage {
+        let img = NSImage(size: NSSize(width: 18, height: 14), flipped: false) { r in
+            let p = NSBezierPath()
+            p.move(to: NSPoint(x: 2, y: r.midY))
+            p.line(to: NSPoint(x: r.maxX - 2, y: r.midY))
+            p.lineWidth = width * 0.8
+            p.lineCapStyle = .round
+            NSColor.black.setStroke()
+            p.stroke()
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(canvas)
+    }
+
+    // MARK: Valg
+
+    func select(tool: Tool) {
+        if tool != .text { canvas.commitText() }
+        toolControl.selectedSegment = tool.rawValue
+        canvas.tool = tool
+        Self.lastTool = tool
+        textControls.isHidden = tool != .text
+        widthControl.isHidden = tool == .text
+    }
+
+    func select(colorIndex i: Int) { apply(color: Self.palette[i]) }
+
+    private func apply(color: NSColor) {
+        canvas.color = color
+        Self.lastColor = color
+        colorWell.color = color
+        for s in swatches { s.selected = s.swatch == color }
+    }
+
+    private func applyTextStyleToControls(_ s: TextStyle) {
+        fontPopup.selectItem(at: TextFonts.all.firstIndex { $0.family == s.family } ?? 0)
+        sizePopup.selectItem(at: TextFonts.sizes.firstIndex(of: s.size) ?? 2)
+        boldButton.state = s.bold ? .on : .off
+    }
+
+    @objc private func toolChanged() {
+        if let t = Tool(rawValue: toolControl.selectedSegment) { select(tool: t) }
+    }
+
+    @objc private func swatchClicked(_ sender: SwatchButton) { apply(color: sender.swatch) }
+    @objc private func colorWellChanged() { apply(color: colorWell.color) }
+
+    @objc private func widthChanged() {
+        Self.lastWidth = widthControl.selectedSegment
+        canvas.lineWidth = Self.widths[widthControl.selectedSegment]
+    }
+
+    @objc private func textStyleChanged() {
+        let s = TextStyle(family: TextFonts.all[max(0, fontPopup.indexOfSelectedItem)].family,
+                          size: TextFonts.sizes[max(0, sizePopup.indexOfSelectedItem)],
+                          bold: boldButton.state == .on)
+        Self.lastTextStyle = s
+        canvas.textStyle = s
+    }
+
+    // MARK: Handlinger
+
+    @objc private func undoClicked() { undo() }
+
+    func undo() {
+        canvas.commitText()
+        doc.undo()
+        refresh()
+    }
+
+    func redo() {
+        canvas.commitText()
+        doc.redo()
+        refresh()
+    }
+
+    private func refresh() {
+        undoButton.isEnabled = doc.canUndo
+        canvas.needsDisplay = true
+    }
+
+    /// Kopier-knappen (⌘C / ↩), etter innstillingen.
+    @objc func copyClicked() {
+        canvas.commitText()
+        guard copyToPasteboard() else { return }
+        switch Settings.shared.copyBehavior {
+        case .copy:
+            flash("Kopiert – lim inn i e-post eller chat")
+        case .copyClose:
+            window?.close()
+        case .copySaveClose:
+            if save() { window?.close() }
+        }
+    }
+
+    /// Lagre-knappen (⌘S), etter innstillingen.
+    @objc func saveClicked() {
+        canvas.commitText()
+        guard save() else { return }
+        if Settings.shared.saveBehavior == .saveClose { window?.close() }
+    }
+
+    @objc func saveAsClicked() {
+        canvas.commitText()
+        guard let window else { return }
+        let p = NSSavePanel()
+        p.allowedContentTypes = [.png]
+        p.directoryURL = savedURL?.deletingLastPathComponent() ?? Settings.shared.folder
+        p.nameFieldStringValue = (savedURL ?? Settings.shared.newScreenshotURL()).lastPathComponent
+        p.beginSheetModal(for: window) { [weak self] r in
+            guard let self, r == .OK, let url = p.url, self.write(to: url) else { return }
+            if Settings.shared.saveBehavior == .saveClose { self.window?.close() }
+        }
+    }
+
+    private func copyToPasteboard() -> Bool {
+        guard let png = doc.renderPNG() else { flash("Kunne ikke lage bildet"); return false }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
+        if let tiff = NSBitmapImageRep(data: png)?.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+        pb.writeObjects([item])
+        return true
+    }
+
+    /// Lagrer i skjermbildemappen. Returnerer false ved feil (vinduet skal da ikke lukkes).
+    @discardableResult
+    func save() -> Bool {
+        let url: URL
+        if let savedURL {
+            url = savedURL
+        } else if temporary {
+            do { try Settings.shared.ensureFolder() } catch { fail(error); return false }
+            url = Settings.shared.newScreenshotURL()
+        } else if doc.isEmpty {
+            // Et eksisterende bilde uten tegninger er allerede lagret.
+            return true
+        } else {
+            // Et eksisterende bilde overskrives ikke; første lagring blir en kopi ved siden av.
+            let base = doc.url.deletingPathExtension().lastPathComponent + " – redigert"
+            url = Settings.shared.newScreenshotURL(base: base, in: doc.url.deletingLastPathComponent())
+        }
+        return write(to: url)
+    }
+
+    private func write(to url: URL) -> Bool {
+        guard let png = doc.renderPNG() else { flash("Kunne ikke lage bildet"); return false }
+        do {
+            try png.write(to: url, options: .atomic)
+            savedURL = url
+            window?.title = url.lastPathComponent
+            window?.representedURL = url
+            flash("Lagret: \(url.lastPathComponent)")
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    private func fail(_ error: Error) {
+        guard let window else { return }
+        NSAlert(error: error).beginSheetModal(for: window)
+    }
+
+    private var flashToken = 0
+    private func flash(_ text: String) {
+        flashToken += 1
+        let token = flashToken
+        statusLabel.stringValue = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            if self?.flashToken == token { self?.statusLabel.stringValue = "" }
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        canvas.commitText()
+        if temporary { try? FileManager.default.removeItem(at: doc.url) }
+        NotificationCenter.default.removeObserver(self)
+        onClose?()
+    }
+}
