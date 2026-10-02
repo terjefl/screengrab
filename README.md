@@ -24,6 +24,9 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 
 ## Tegnevinduet
 
+Verktøyene ligger øverst, og knappene for å bli ferdig (Lagre som…, Lagre, Kopier) ligger nederst til høyre,
+med statusmeldinger nede til venstre. Hovedknappen nederst til høyre aktiveres med ↩.
+
 | Verktøy | Tast | |
 |---|---|---|
 | Velg og flytt | V | se under |

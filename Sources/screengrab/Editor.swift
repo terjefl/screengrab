@@ -1187,30 +1187,41 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         saveAs.toolTip = "Lagre et annet sted (⌘⇧S)"
         updateButtonTitles()
 
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        // Øverst: verktøy for å tegne. Nederst: status og knapper for å bli ferdig,
+        // med hovedknappen (↩) nederst til høyre som i macOS-dialoger.
         let colors = NSStackView(views: swatches + [colorWell])
         colors.spacing = 2
-        bar.setViews([toolControl, colors, widthControl, redactControl, textControls, undoButton, spacer, statusLabel, saveAs, saveButton, copyButton],
-                     in: .leading)
+        // Fleksibelt mellomrom til slutt, så verktøyene holder seg samlet til venstre.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        bar.setViews([toolControl, colors, widthControl, redactControl, textControls, undoButton, spacer], in: .leading)
         bar.spacing = 12
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        bar.setCustomSpacing(4, after: saveAs)
-        bar.setCustomSpacing(4, after: saveButton)
+
+        let actions = NSStackView()
+        actions.setViews([statusLabel], in: .leading)
+        actions.setViews([saveAs, saveButton, copyButton], in: .trailing)
+        actions.spacing = 8
+        actions.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 10, right: 12)
+
+        let topLine = NSBox(), bottomLine = NSBox()
+        topLine.boxType = .separator
+        bottomLine.boxType = .separator
 
         let content = NSView()
-        for v in [bar, canvas] as [NSView] {
+        for v in [bar, topLine, canvas, bottomLine, actions] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
+            v.leadingAnchor.constraint(equalTo: content.leadingAnchor).isActive = true
+            v.trailingAnchor.constraint(equalTo: content.trailingAnchor).isActive = true
         }
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: content.topAnchor),
-            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            canvas.topAnchor.constraint(equalTo: bar.bottomAnchor),
-            canvas.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            canvas.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            canvas.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            topLine.topAnchor.constraint(equalTo: bar.bottomAnchor),
+            canvas.topAnchor.constraint(equalTo: topLine.bottomAnchor),
+            bottomLine.topAnchor.constraint(equalTo: canvas.bottomAnchor),
+            actions.topAnchor.constraint(equalTo: bottomLine.bottomAnchor),
+            actions.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentView = content
 
@@ -1219,13 +1230,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         textControls.isHidden = false
         widthControl.isHidden = true
         redactControl.isHidden = true
-        let barSize = bar.fittingSize
+        let barSize = bar.fittingSize, actionsSize = actions.fittingSize
+        let chrome = barSize.height + actionsSize.height + 2
+        let minWidth = max(barSize.width, actionsSize.width)
         let screen = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-        let maxW = screen.width * 0.85, maxH = screen.height * 0.85 - barSize.height
+        let maxW = screen.width * 0.85, maxH = screen.height * 0.85 - chrome
         let s = min(1, maxW / doc.size.width, maxH / doc.size.height)
-        let size = NSSize(width: max(doc.size.width * s, barSize.width),
-                          height: max(doc.size.height * s, 160) + barSize.height)
-        window.contentMinSize = NSSize(width: barSize.width, height: barSize.height + 120)
+        let size = NSSize(width: max(doc.size.width * s, minWidth),
+                          height: max(doc.size.height * s, 160) + chrome)
+        window.contentMinSize = NSSize(width: minWidth, height: chrome + 120)
         window.setContentSize(size)
         window.center()
     }
