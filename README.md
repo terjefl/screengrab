@@ -1,7 +1,7 @@
 # screengrab
 
 Et enkelt skjermklippverktøy for macOS som ligger i menylinjen. Det bruker systemets eget områdevalg
-(`screencapture -i`) og har et lite tegnevindu for piler, sirkler, rektangler, frihånd, markeringstusj og tekst.
+(`screencapture -i`) og har et lite tegnevindu for piler, sirkler, rektangler, frihånd, markeringstusj, tekst og sladding/uskarphet.
 
 ## Hurtigtaster (standard, kan endres i Innstillinger)
 
@@ -31,6 +31,7 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 | Rektangel | R | ⇧ gir kvadrat |
 | Frihånd | P | |
 | Markeringstusj | M | |
+| Skjul | B | piksler, uskarp eller svart sladd |
 | Tekst | T | se under |
 
 - Farger: 1–8, eller valgfri farge fra fargevelgeren. Strektykkelse: tynn, middels eller tykk.
@@ -40,6 +41,10 @@ Under områdevalget fungerer alt som med macOS sin ⌘⇧4: mellomrom velger et 
 Klikk på en eksisterende tekst for å endre den (tøm den for å slette den). Du kan velge mellom seks
 lesbare fonter (SF Pro, Helvetica Neue, Arial, Verdana, Avenir Next og Georgia), 14–48 pt og fet skrift.
 Teksten får en tynn kontrastkant, så den er lesbar på både lys og mørk bakgrunn.
+
+**Skjul:** Dra et rektangel over det som skal skjules, og velg variant i verktøylinjen. *Piksler* gjør området
+om til store blokker, *Uskarp* gjør det uskarpt og *Sladd* dekker det med svart. Piksler og uskarphet hentes alltid
+fra originalbildet. Svart sladd er sikrest for passord og lignende, fordi det ikke ligger noe igjen av innholdet.
 
 **Kopier og Lagre** (oppførselen velges i Innstillinger):
 
@@ -109,7 +114,8 @@ ellers Skrivebordet. Den kan endres i Innstillinger.
 | `Sources/screengrab/Editor.swift` | tegnevinduet, figurer, tekst, kopiering og lagring |
 | `Sources/screengrab/Settings.swift` | innstillinger og innstillingsvindu |
 | `Sources/screengrab/Hotkeys.swift` | globale hurtigtaster (Carbon, krever ingen Tilgjengelighet-tillatelse) |
-| `mac/` | Info.plist og LaunchAgent |
+| `mac/` | Info.plist, LaunchAgent og app-ikonet (`AppIcon.icns`) |
+| `mac/lag-ikon.swift` | tegner app-ikonet: `swift mac/lag-ikon.swift` lager `mac/AppIcon.icns` på nytt |
 | `build.sh`, `install.sh` | bygg, signering og installasjon |
 
 ## Lisens

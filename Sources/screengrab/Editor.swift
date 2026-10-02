@@ -1,10 +1,11 @@
 import AppKit
+import CoreImage
 import ImageIO
 
 // MARK: - Modell
 
 enum Tool: Int, CaseIterable {
-    case arrow, ellipse, rect, pen, marker, text
+    case arrow, ellipse, rect, pen, marker, redact, text
 
     var symbol: String {
         switch self {
@@ -13,6 +14,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "rectangle"
         case .pen: return "scribble"
         case .marker: return "highlighter"
+        case .redact: return "eye.slash"
         case .text: return "textformat"
         }
     }
@@ -24,6 +26,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "r"
         case .pen: return "p"
         case .marker: return "m"
+        case .redact: return "b"
         case .text: return "t"
         }
     }
@@ -35,6 +38,7 @@ enum Tool: Int, CaseIterable {
         case .rect: return "Rektangel (R) – hold ⇧ for kvadrat"
         case .pen: return "Frihånd (P)"
         case .marker: return "Markeringstusj (M)"
+        case .redact: return "Skjul (B) – piksler, uskarp eller svart sladd. Svart sladd er sikrest."
         case .text: return "Tekst (T) – klikk for å skrive, klikk på en tekst for å endre den"
         }
     }
@@ -69,6 +73,20 @@ enum TextFonts {
     }
 }
 
+/// Hvordan et område skjules. Svart sladd fjerner innholdet helt; piksler og uskarphet
+/// gjør det uleselig, men er i prinsippet mindre sikkert for svært kort tekst.
+enum RedactMode: Int, CaseIterable {
+    case pixelate, blur, solid
+
+    var title: String {
+        switch self {
+        case .pixelate: return "Piksler"
+        case .blur: return "Uskarp"
+        case .solid: return "Sladd"
+        }
+    }
+}
+
 struct TextStyle {
     var family = "system"
     var size: CGFloat = 24
@@ -84,10 +102,14 @@ struct Annotation {
     var width: CGFloat
     var text = ""
     var style = TextStyle()
+    var redact = RedactMode.pixelate
+    /// Ferdig behandlet utsnitt av originalbildet (piksler/uskarp) og området det dekker.
+    var patch: CGImage?
+    var patchRect: CGRect = .zero
 
     private var start: CGPoint { points.first ?? .zero }
     private var end: CGPoint { points.last ?? .zero }
-    private var box: CGRect {
+    var box: CGRect {
         CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                width: abs(end.x - start.x), height: abs(end.y - start.y))
     }
@@ -97,6 +119,7 @@ struct Annotation {
         switch tool {
         case .pen, .marker: return points.count < 2
         case .text: return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .redact: return min(box.width, box.height) < 3
         default: return hypot(end.x - start.x, end.y - start.y) < 3
         }
     }
@@ -133,6 +156,15 @@ struct Annotation {
             p.stroke()
         case .text:
             drawText(in: ctx)
+        case .redact:
+            if redact == .solid || patch == nil {
+                NSColor.black.setFill()
+                NSBezierPath(rect: redact == .solid ? box : patchRect).fill()
+            } else if let patch {
+                // Pikslene er lagret i lav oppløsning; uten interpolasjon blir de skarpe blokker.
+                ctx.imageInterpolation = redact == .pixelate ? .none : .high
+                ctx.cgContext.draw(patch, in: patchRect)
+            }
         }
     }
 
@@ -241,6 +273,39 @@ final class EditorDocument {
         image = NSImage(cgImage: cg, size: size)
     }
 
+    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    /// Lager utsnittet som dekker et område med piksler eller uskarphet, fra originalbildet.
+    func applyRedaction(to a: inout Annotation) {
+        a.patch = nil
+        a.patchRect = a.box.intersection(CGRect(origin: .zero, size: size))
+        guard a.redact != .solid, a.patchRect.width >= 1, a.patchRect.height >= 1 else { return }
+        let r = a.patchRect
+        let sx = CGFloat(cgImage.width) / size.width
+        // CGImage-utsnitt har origo øverst til venstre.
+        let px = CGRect(x: r.minX * sx, y: (size.height - r.maxY) * sx, width: r.width * sx, height: r.height * sx).integral
+        guard let crop = cgImage.cropping(to: px) else { return }
+        a.patchRect = CGRect(x: px.minX / sx, y: size.height - px.maxY / sx, width: px.width / sx, height: px.height / sx)
+        switch a.redact {
+        case .pixelate:
+            let block = 12 * sx // ca. 12 pt store blokker
+            let w = max(1, Int((CGFloat(crop.width) / block).rounded()))
+            let h = max(1, Int((CGFloat(crop.height) / block).rounded()))
+            guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            ctx.interpolationQuality = .high
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
+            a.patch = ctx.makeImage()
+        case .blur:
+            let ci = CIImage(cgImage: crop)
+            let out = ci.clampedToExtent().applyingGaussianBlur(sigma: 10 * sx).cropped(to: ci.extent)
+            a.patch = Self.ciContext.createCGImage(out, from: ci.extent)
+        case .solid:
+            break
+        }
+    }
+
     var canUndo: Bool { !undoStack.isEmpty }
     var isEmpty: Bool { annotations.isEmpty }
 
@@ -297,6 +362,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         didSet { pendingText?.color = color; styleTextField() }
     }
     var lineWidth: CGFloat = 4
+    var redactMode = RedactMode.pixelate
     var textStyle = TextStyle() {
         didSet { pendingText?.style = textStyle; styleTextField() }
     }
@@ -377,7 +443,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             beginText(at: p, existing: hit)
             return
         }
-        current = Annotation(tool: tool, points: [p, p], color: color, width: lineWidth)
+        current = Annotation(tool: tool, points: [p, p], color: color, width: lineWidth, redact: redactMode)
         if tool == .pen || tool == .marker { current?.points = [p] }
         needsDisplay = true
     }
@@ -392,6 +458,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         default:
             if event.modifierFlags.contains(.shift) { p = constrain(from: a.points[0], to: p, tool: a.tool) }
             a.points[1] = p
+            if a.tool == .redact { doc.applyRedaction(to: &a) }
         }
         current = a
         needsDisplay = true
@@ -631,6 +698,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private let bar = NSStackView()
     private let toolControl = NSSegmentedControl()
     private let widthControl = NSSegmentedControl()
+    private let redactControl = NSSegmentedControl()
     private var swatches: [SwatchButton] = []
     private let colorWell = NSColorWell(style: .minimal)
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -647,6 +715,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private static var lastColor: NSColor = palette[0]
     private static var lastWidth = 1
     private static var lastTextStyle = TextStyle()
+    private static var lastRedact = RedactMode.pixelate
 
     init?(url: URL, temporary: Bool) {
         guard let doc = EditorDocument(url: url) else { return nil }
@@ -668,6 +737,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         canvas.lineWidth = Self.widths[Self.lastWidth]
         applyTextStyleToControls(Self.lastTextStyle)
         canvas.textStyle = Self.lastTextStyle
+        redactControl.selectedSegment = Self.lastRedact.rawValue
+        canvas.redactMode = Self.lastRedact
         select(tool: Self.lastTool)
         canvas.onCommit = { [weak self] in self?.refresh() }
         refresh()
@@ -715,6 +786,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         widthControl.target = self
         widthControl.action = #selector(widthChanged)
 
+        // Skjulemåte (vises bare med skjul-verktøyet).
+        redactControl.segmentStyle = .separated
+        redactControl.trackingMode = .selectOne
+        redactControl.segmentCount = RedactMode.allCases.count
+        for m in RedactMode.allCases { redactControl.setLabel(m.title, forSegment: m.rawValue) }
+        redactControl.setToolTip("Gjør området om til store piksler", forSegment: RedactMode.pixelate.rawValue)
+        redactControl.setToolTip("Gjør området uskarpt", forSegment: RedactMode.blur.rawValue)
+        redactControl.setToolTip("Dekk området med svart (sikrest)", forSegment: RedactMode.solid.rawValue)
+        redactControl.target = self
+        redactControl.action = #selector(redactChanged)
+
         // Tekstvalg (vises bare med tekstverktøyet).
         for f in TextFonts.all {
             fontPopup.addItem(withTitle: f.title)
@@ -760,7 +842,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let colors = NSStackView(views: swatches + [colorWell])
         colors.spacing = 2
-        bar.setViews([toolControl, colors, widthControl, textControls, undoButton, spacer, statusLabel, saveAs, saveButton, copyButton],
+        bar.setViews([toolControl, colors, widthControl, redactControl, textControls, undoButton, spacer, statusLabel, saveAs, saveButton, copyButton],
                      in: .leading)
         bar.spacing = 12
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
@@ -787,6 +869,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         // Verktøylinjen er bredest når tekstvalgene vises.
         textControls.isHidden = false
         widthControl.isHidden = true
+        redactControl.isHidden = true
         let barSize = bar.fittingSize
         let screen = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
         let maxW = screen.width * 0.85, maxH = screen.height * 0.85 - barSize.height
@@ -844,7 +927,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         canvas.tool = tool
         Self.lastTool = tool
         textControls.isHidden = tool != .text
-        widthControl.isHidden = tool == .text
+        redactControl.isHidden = tool != .redact
+        widthControl.isHidden = tool == .text || tool == .redact
     }
 
     func select(colorIndex i: Int) { apply(color: Self.palette[i]) }
@@ -872,6 +956,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     @objc private func widthChanged() {
         Self.lastWidth = widthControl.selectedSegment
         canvas.lineWidth = Self.widths[widthControl.selectedSegment]
+    }
+
+    @objc private func redactChanged() {
+        let m = RedactMode(rawValue: redactControl.selectedSegment) ?? .pixelate
+        Self.lastRedact = m
+        canvas.redactMode = m
     }
 
     @objc private func textStyleChanged() {
